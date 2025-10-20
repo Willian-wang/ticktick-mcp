@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
 
 from .ticktick_client import TickTickClient
+from .task_monitor import TaskMonitor, TaskDatabase
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -17,11 +18,12 @@ logger = logging.getLogger(__name__)
 # Create FastMCP server
 mcp = FastMCP("ticktick")
 
-# Create TickTick client
+# Create TickTick client and task monitor
 ticktick = None
+task_monitor = None
 
 def initialize_client():
-    global ticktick
+    global ticktick, task_monitor
     try:
         # Check if .env file exists with access token
         load_dotenv()
@@ -43,6 +45,16 @@ def initialize_client():
             return False
             
         logger.info(f"Successfully connected to TickTick API with {len(projects)} projects")
+        
+        # Initialize and start task monitor
+        # Get check interval from environment variable (default: 600 seconds = 10 minutes)
+        check_interval = int(os.getenv("TASK_MONITOR_INTERVAL", "600"))
+        db_path = os.getenv("TASK_MONITOR_DB_PATH")  # Optional custom db path
+        
+        task_monitor = TaskMonitor(ticktick, db_path=db_path, check_interval=check_interval)
+        task_monitor.start()
+        logger.info(f"Task monitor started with check interval: {check_interval}s")
+        
         return True
     except Exception as e:
         logger.error(f"Failed to initialize TickTick client: {e}")
@@ -980,6 +992,168 @@ async def create_subtask(
     except Exception as e:
         logger.error(f"Error in create_subtask: {e}")
         return f"Error creating subtask: {str(e)}"
+
+
+# Task History and Monitoring Tools
+
+@mcp.tool()
+async def get_completed_tasks(
+    start_date: str = None,
+    end_date: str = None,
+    project_id: str = None,
+    limit: int = 50
+) -> str:
+    """
+    Get completed tasks from the task history database.
+    This tool retrieves tasks that have been detected as completed by the background monitor.
+    
+    Args:
+        start_date: Start date filter (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS) (optional)
+        end_date: End date filter (ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS) (optional)
+        project_id: Filter by project ID (optional)
+        limit: Maximum number of tasks to return (default: 50)
+    
+    Examples:
+        - Get all completed tasks: get_completed_tasks()
+        - Get tasks completed today: get_completed_tasks(start_date="2025-10-20")
+        - Get tasks completed in October: get_completed_tasks(start_date="2025-10-01", end_date="2025-10-31")
+        - Get tasks from specific project: get_completed_tasks(project_id="abc123")
+    """
+    if not task_monitor:
+        return "Task monitor not initialized. Please restart the server."
+    
+    try:
+        # Validate dates if provided
+        if start_date:
+            try:
+                # Try to parse the date to validate it
+                if 'T' not in start_date:
+                    start_date = f"{start_date}T00:00:00"
+                datetime.fromisoformat(start_date)
+            except ValueError:
+                return f"Invalid start_date format. Use ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
+        
+        if end_date:
+            try:
+                # Try to parse the date to validate it
+                if 'T' not in end_date:
+                    end_date = f"{end_date}T23:59:59"
+                datetime.fromisoformat(end_date)
+            except ValueError:
+                return f"Invalid end_date format. Use ISO format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"
+        
+        # Query completed tasks
+        completed_tasks = task_monitor.database.get_completed_tasks(
+            start_date=start_date,
+            end_date=end_date,
+            project_id=project_id,
+            limit=limit
+        )
+        
+        if not completed_tasks:
+            filters = []
+            if start_date:
+                filters.append(f"after {start_date}")
+            if end_date:
+                filters.append(f"before {end_date}")
+            if project_id:
+                filters.append(f"in project {project_id}")
+            
+            filter_str = " ".join(filters) if filters else ""
+            return f"No completed tasks found{' ' + filter_str if filter_str else ''}."
+        
+        result = f"Found {len(completed_tasks)} completed task(s):\n\n"
+        
+        for i, task in enumerate(completed_tasks, 1):
+            result += f"Task {i}:\n"
+            result += f"  Title: {task['title']}\n"
+            result += f"  Task ID: {task['task_id']}\n"
+            result += f"  Project ID: {task['project_id']}\n"
+            
+            if task['content']:
+                result += f"  Content: {task['content']}\n"
+            
+            if task['priority'] > 0:
+                priority_name = PRIORITY_MAP.get(task['priority'], str(task['priority']))
+                result += f"  Priority: {priority_name}\n"
+            
+            if task['completed_time']:
+                result += f"  Completed: {task['completed_time']}\n"
+            
+            if task['created_time']:
+                result += f"  Created: {task['created_time']}\n"
+            
+            if task['due_date']:
+                result += f"  Due Date: {task['due_date']}\n"
+            
+            result += f"  Detection Time: {task['completion_detected_at']}\n"
+            result += "\n"
+        
+        if len(completed_tasks) == limit:
+            result += f"\n(Showing first {limit} results. Use 'limit' parameter to see more.)\n"
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error in get_completed_tasks: {e}")
+        return f"Error retrieving completed tasks: {str(e)}"
+
+
+@mcp.tool()
+async def get_task_statistics() -> str:
+    """
+    Get statistics about tasks including completion rates and counts.
+    
+    This provides insights into:
+    - Current number of active (incomplete) tasks
+    - Total completed tasks tracked
+    - Tasks completed today
+    - Tasks completed this week
+    - Tasks deleted
+    """
+    if not task_monitor:
+        return "Task monitor not initialized. Please restart the server."
+    
+    try:
+        stats = task_monitor.database.get_statistics()
+        
+        result = "📊 Task Statistics\n\n"
+        result += f"📝 Current Tasks: {stats['current_tasks']}\n"
+        result += f"✅ Total Completed: {stats['completed_tasks']}\n"
+        result += f"🎯 Completed Today: {stats['completed_today']}\n"
+        result += f"📅 Completed This Week: {stats['completed_this_week']}\n"
+        result += f"🗑️ Deleted Tasks: {stats['deleted_tasks']}\n"
+        
+        # Calculate completion rate if there are tasks
+        total_tracked = stats['current_tasks'] + stats['completed_tasks']
+        if total_tracked > 0:
+            completion_rate = (stats['completed_tasks'] / total_tracked) * 100
+            result += f"\n📈 Completion Rate: {completion_rate:.1f}%\n"
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error in get_task_statistics: {e}")
+        return f"Error retrieving statistics: {str(e)}"
+
+
+@mcp.tool()
+async def trigger_task_check() -> str:
+    """
+    Manually trigger a task check to update the completed/deleted task list.
+    
+    This is useful if you want to immediately capture any recently completed tasks
+    without waiting for the automatic check interval.
+    """
+    if not task_monitor:
+        return "Task monitor not initialized. Please restart the server."
+    
+    try:
+        logger.info("Manual task check triggered")
+        task_monitor.check_tasks()
+        return "✅ Task check completed successfully. The task history has been updated."
+    except Exception as e:
+        logger.error(f"Error in trigger_task_check: {e}")
+        return f"Error triggering task check: {str(e)}"
+
 
 def main():
     """Main entry point for the MCP server."""

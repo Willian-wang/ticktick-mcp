@@ -11,6 +11,9 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for Ti
 - 🗑️ Delete tasks and projects
 - 🔄 Full integration with TickTick's open API
 - 🔌 Seamless integration with Claude and other MCP clients
+- 📊 **NEW**: Automatic task completion tracking with background monitoring
+- 🗄️ **NEW**: Query completed tasks history with time-based filtering
+- 📈 **NEW**: Task statistics and completion analytics
 
 ## Prerequisites
 
@@ -171,6 +174,13 @@ Once connected, you'll see the TickTick MCP server tools available in Claude, in
 | `get_next_tasks` | Get "next" tasks (medium priority or due tomorrow) | None |
 | `batch_create_tasks` | Create multiple tasks at once | `tasks` (list of task dictionaries) |
 
+### Task History & Monitoring (NEW)
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `get_completed_tasks` | Query completed tasks with time filtering | `start_date` (optional), `end_date` (optional), `project_id` (optional), `limit` (optional, default: 50) |
+| `get_task_statistics` | Get task statistics and completion analytics | None |
+| `trigger_task_check` | Manually trigger task check to update history | None |
+
 ## Example Prompts for Claude
 
 Here are some example prompts to use with Claude after connecting the TickTick MCP server:
@@ -207,6 +217,60 @@ For example:
 - "Walk me through my next actions and help my identify what I should focus on tomorrow?" 
 - "Break down this project into 5 smaller actionable tasks"
 
+### Task History & Analytics (NEW)
+
+- "Show me all tasks I completed today"
+- "What tasks did I complete this week?"
+- "Show me my task completion statistics"
+- "What did I accomplish in October?"
+- "How many tasks have I completed in the Work project?"
+- "Update my task history now" (manually trigger check)
+
+## Task Monitoring Feature
+
+### Overview
+
+The MCP server now includes an automatic task monitoring system that tracks task completions in the background. This solves a key limitation of the TickTick Open API, which doesn't provide a direct way to query completed tasks.
+
+### How It Works
+
+1. **Background Monitoring**: When the server starts, a background thread begins monitoring your tasks at regular intervals (default: 10 minutes)
+2. **Task Snapshots**: Each check saves a snapshot of all current incomplete tasks
+3. **Change Detection**: By comparing snapshots, the system detects which tasks have disappeared (completed or deleted)
+4. **Status Verification**: For disappeared tasks, the system queries the API to determine if they were completed or deleted
+5. **History Storage**: Completed tasks are saved to a local SQLite database with full metadata and timestamps
+6. **Time-Based Queries**: You can query completed tasks by date range, project, or other criteria
+
+### Configuration
+
+Add these environment variables to your `.env` file:
+
+```env
+# Check interval in seconds (default: 600 = 10 minutes)
+TASK_MONITOR_INTERVAL=600
+
+# Optional: Custom database path
+# TASK_MONITOR_DB_PATH=/path/to/custom/task_history.db
+```
+
+See [CONFIG.md](CONFIG.md) for detailed configuration options.
+
+### Database
+
+The monitoring system uses SQLite to store three tables:
+- `current_tasks`: Snapshot of current incomplete tasks
+- `completed_tasks`: History of completed tasks (queryable)
+- `deleted_tasks`: History of deleted tasks
+
+The database file (`task_history.db`) is created automatically in the server's working directory.
+
+### Important Notes
+
+- The first check after starting the server establishes a baseline and won't report any completions
+- If the server is offline, task completions during that time won't be captured
+- The monitoring runs continuously as long as the server is running
+- You can manually trigger a check at any time using the `trigger_task_check` tool
+
 ## Development
 
 ### Project Structure
@@ -214,10 +278,12 @@ For example:
 ```
 ticktick-mcp/
 ├── .env.template          # Template for environment variables
+├── CONFIG.md              # Configuration guide for task monitoring
 ├── README.md              # Project documentation
 ├── requirements.txt       # Project dependencies
 ├── setup.py               # Package setup file
 ├── test_server.py         # Test script for server configuration
+├── task_history.db        # SQLite database (created at runtime)
 └── ticktick_mcp/          # Main package
     ├── __init__.py        # Package initialization
     ├── authenticate.py    # OAuth authentication utility
@@ -226,6 +292,7 @@ ticktick-mcp/
         ├── __init__.py    # Module initialization
         ├── auth.py        # OAuth authentication implementation
         ├── server.py      # MCP server implementation
+        ├── task_monitor.py # Task monitoring system (NEW)
         └── ticktick_client.py  # TickTick API client
 ```
 
